@@ -7,7 +7,7 @@ A GitHub Copilot skill and dependency-free Python CLI for preprocessing DVS STIL
 - Reads plain `.stil` and gzip-compressed `.stil.gz` files.
 - Preserves the source file and writes `*_process.stil` or `*_process.stil.gz`.
 - Calculates Loop counts exactly from free-drive time and TAP period.
-- Adds a 20,000-cycle copied Vector before every `dps_trigger: 0` and `dps_trigger: 1` instruction.
+- Adds a 20,000-cycle copied Vector before each `dps_trigger: 0` and an empty 20,000-cycle Vector before each `dps_trigger: 1`.
 - Enforces a minimum of 100,000 cycles for each waiting-after-trigger Loop.
 - Generates unique label suffixes from `0` through `15`.
 - Supports CCD, IOD, and DRD pattern-specific pin profiles.
@@ -107,7 +107,7 @@ For each of the 16 original `dps_trigger: 0` instructions, block index $i$ range
 3. Keep `dps_trigger: 0`.
 4. Add `label:waiting_after_trigger0_i` and an empty free-drive Loop.
 5. Add `label:start_stress_i` and an empty stress Loop.
-6. Add `label:waiting_before_trigger1_i` and another 20,000-cycle Loop containing the same modified copied Vector.
+6. Add `label:waiting_before_trigger1_i` and an empty 20,000-cycle `V {}` Loop.
 7. Add `dps_trigger: 1`.
 8. Add `label:waiting_after_trigger1_i` and another empty free-drive Loop.
 9. Retain the customer's original vectors after the inserted sequence.

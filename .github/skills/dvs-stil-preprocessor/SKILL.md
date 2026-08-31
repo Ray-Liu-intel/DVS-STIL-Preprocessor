@@ -29,7 +29,7 @@ The input must contain exactly 16 `Ann {* SE_CMD dps_trigger: 0; *}` instruction
 3. Add `label:waiting_after_trigger0_<block-index>`.
 4. Add an empty free-drive Loop with count `max((freedrivetime + 0.2ms) / tapperiod, 100000)`.
 5. Add `label:start_stress_<block-index>` and an empty `V {}` Loop with count `(100ms / 16) / tapperiod`.
-6. Add `label:waiting_before_trigger1_<block-index>` and another 20,000-cycle Loop containing the same pattern-specific copied Vector.
+6. Add `label:waiting_before_trigger1_<block-index>` and an empty 20,000-cycle `V {}` Loop. Do not copy the preceding Vector into this Loop.
 7. Add `dps_trigger: 1`.
 8. Add `label:waiting_after_trigger1_<block-index>` and another empty `V {}` free-drive Loop using the same minimum-adjusted count.
 
@@ -56,7 +56,8 @@ All 16 blocks reuse trigger IDs `0` and `1`; do not increment IDs between blocks
    - 16 occurrences each of `dps_trigger: 0` and `dps_trigger: 1`.
    - Exactly one indexed label for each family and block index, including both waiting-before label families.
    - 32 pre-trigger Loops, 32 free-drive Loops, and 16 stress Loops.
-   - Each pre-trigger copied Loop has every signal for the selected pattern type set to `0`.
+   - Each `waiting_before_trigger0` copied Loop has every signal for the selected pattern type set to `0`.
+   - Every `waiting_before_trigger1` Loop contains an empty `V {}`.
    - Customer vectors following each inserted sequence remain byte-for-byte identical to the corresponding input suffix content.
 6. Report the output path and all counts. If any validation fails, do not present the output as ready.
 

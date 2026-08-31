@@ -57,8 +57,13 @@ class PreprocessorTests(unittest.TestCase):
             insertion.index("dps_trigger: 1;"),
         )
         self.assertEqual(insertion.count("Loop 20000 {"), 2)
-        self.assertEqual(insertion.count("_bidi_=X;"), 2)
+        self.assertEqual(insertion.count("_bidi_=X;"), 1)
         self.assertLess(insertion.index("_bidi_=X;"), insertion.index("dps_trigger: 0;"))
+        before_trigger1 = insertion[
+            insertion.index("label:waiting_before_trigger1_3;") : insertion.index("dps_trigger: 1;")
+        ]
+        self.assertIn("Loop 20000 {\n  V {\n  }\n}", before_trigger1)
+        self.assertNotIn("_bidi_", before_trigger1)
         self.assertEqual(insertion.count("Loop 100000 {"), 2)
 
     def test_pattern_signal_profiles(self):

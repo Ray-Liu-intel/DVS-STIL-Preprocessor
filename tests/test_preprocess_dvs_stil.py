@@ -39,7 +39,7 @@ class PreprocessorTests(unittest.TestCase):
     def test_insertion_adds_indexed_pre_trigger_loop(self):
         insertion = MODULE.build_insertion(
             "Ann {* SE_CMD dps_trigger: 0; *}\n",
-            "V {\n}",
+            "V {  _bidi_=X;\n}",
             20000,
             100000,
             312500,
@@ -52,8 +52,13 @@ class PreprocessorTests(unittest.TestCase):
             insertion.index("label:waiting_before_trigger0_3;"),
             insertion.index("dps_trigger: 0;"),
         )
-        self.assertIn("Loop 20000 {", insertion)
-        self.assertLess(insertion.index("V {\n  }"), insertion.index("dps_trigger: 0;"))
+        self.assertLess(
+            insertion.index("label:waiting_before_trigger1_3;"),
+            insertion.index("dps_trigger: 1;"),
+        )
+        self.assertEqual(insertion.count("Loop 20000 {"), 2)
+        self.assertEqual(insertion.count("_bidi_=X;"), 2)
+        self.assertLess(insertion.index("_bidi_=X;"), insertion.index("dps_trigger: 0;"))
         self.assertEqual(insertion.count("Loop 100000 {"), 2)
 
     def test_pattern_signal_profiles(self):

@@ -29,8 +29,9 @@ The input must contain exactly 16 `Ann {* SE_CMD dps_trigger: 0; *}` instruction
 3. Add `label:waiting_after_trigger0_<block-index>`.
 4. Add an empty free-drive Loop with count `max((freedrivetime + 0.2ms) / tapperiod, 100000)`.
 5. Add `label:start_stress_<block-index>` and an empty `V {}` Loop with count `(100ms / 16) / tapperiod`.
-6. Add `dps_trigger: 1`.
-7. Add `label:waiting_after_trigger1_<block-index>` and another empty `V {}` free-drive Loop using the same minimum-adjusted count.
+6. Add `label:waiting_before_trigger1_<block-index>` and another 20,000-cycle Loop containing the same pattern-specific copied Vector.
+7. Add `dps_trigger: 1`.
+8. Add `label:waiting_after_trigger1_<block-index>` and another empty `V {}` free-drive Loop using the same minimum-adjusted count.
 
 Pattern-specific signals forced to `0` in each pre-trigger copy:
 
@@ -38,7 +39,7 @@ Pattern-specific signals forced to `0` in each pre-trigger copy:
 - `IOD`: `UART_RXD_IOD`, `AVSBUS_SDATA0`
 - `DRD`: `UART_RXD_DRD`
 
-All 16 blocks reuse trigger IDs `0` and `1`; do not increment IDs between blocks. Label suffixes must use the zero-based block index `0` through `15`, including `waiting_before_trigger0_0` through `waiting_before_trigger0_15`. Loop calculations must be exact integers before applying the 100,000-cycle minimum. The script rejects non-integral values, missing signals/vectors, unexpected trigger counts, already processed input, and attempts to overwrite the source.
+All 16 blocks reuse trigger IDs `0` and `1`; do not increment IDs between blocks. Label suffixes must use the zero-based block index `0` through `15`, including both `waiting_before_trigger0_0` through `_15` and `waiting_before_trigger1_0` through `_15`. Loop calculations must be exact integers before applying the 100,000-cycle minimum. The script rejects non-integral values, missing signals/vectors, unexpected trigger counts, already processed input, and attempts to overwrite the source.
 
 ## Procedure
 
@@ -53,8 +54,8 @@ All 16 blocks reuse trigger IDs `0` and `1`; do not increment IDs between blocks
 4. Run again without `--dry-run`. Normally omit `--output` so the result is written beside the source as `*_process.stil` or `*_process.stil.gz`. Use an underscore before `process`; never name it `.process`.
 5. Validate the generated file:
    - 16 occurrences each of `dps_trigger: 0` and `dps_trigger: 1`.
-   - Exactly one indexed label for each family and block index, including `waiting_before_trigger0_0` through `_15`.
-   - 16 pre-trigger Loops, 32 free-drive Loops, and 16 stress Loops.
+   - Exactly one indexed label for each family and block index, including both waiting-before label families.
+   - 32 pre-trigger Loops, 32 free-drive Loops, and 16 stress Loops.
    - Each pre-trigger copied Loop has every signal for the selected pattern type set to `0`.
    - Customer vectors following each inserted sequence remain byte-for-byte identical to the corresponding input suffix content.
 6. Report the output path and all counts. If any validation fails, do not present the output as ready.

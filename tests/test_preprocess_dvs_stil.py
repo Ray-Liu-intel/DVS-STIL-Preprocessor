@@ -29,6 +29,51 @@ class PreprocessorTests(unittest.TestCase):
             625000,
         )
 
+    def test_wait_loop_uses_minimum_of_100000(self):
+        tap = MODULE.parse_duration_ns("20ns")
+        free = MODULE.parse_duration_ns("1ms") + MODULE.parse_duration_ns("0.2ms")
+        calculated = MODULE.exact_loop_count(free, tap, "free")
+        self.assertEqual(calculated, 60000)
+        self.assertEqual(max(calculated, 100000), 100000)
+
+    def test_insertion_adds_indexed_pre_trigger_loop(self):
+        insertion = MODULE.build_insertion(
+            "Ann {* SE_CMD dps_trigger: 0; *}\n",
+            "V {\n}",
+            20000,
+            100000,
+            312500,
+            3,
+            "",
+            "\n",
+        )
+        self.assertIn("label:waiting_before_trigger0_3;", insertion)
+        self.assertLess(
+            insertion.index("label:waiting_before_trigger0_3;"),
+            insertion.index("dps_trigger: 0;"),
+        )
+        self.assertIn("Loop 20000 {", insertion)
+        self.assertLess(insertion.index("V {\n  }"), insertion.index("dps_trigger: 0;"))
+        self.assertEqual(insertion.count("Loop 100000 {"), 2)
+
+    def test_pattern_signal_profiles(self):
+        self.assertEqual(MODULE.PATTERN_SIGNALS["DRD"], ("UART_RXD_DRD",))
+        self.assertEqual(
+            MODULE.PATTERN_SIGNALS["IOD"],
+            ("UART_RXD_IOD", "AVSBUS_SDATA0"),
+        )
+        self.assertEqual(
+            MODULE.PATTERN_SIGNALS["CCD"],
+            ("I2C_IPMI_SCL", "STIMER_CCDNE1", "UART_RXD_CCD_L_S", "UART_RXD_CCD_S"),
+        )
+
+    def test_force_multiple_bidi_signals(self):
+        block = "V {  _bidi_=X11X1;\n}"
+        self.assertEqual(
+            MODULE.force_bidi_signals(block, (1, 3), "0"),
+            "V {  _bidi_=X0101;\n}",
+        )
+
     def test_default_output_uses_process_suffix(self):
         self.assertEqual(
             MODULE.default_output_path(Path("sample.stil.gz")),

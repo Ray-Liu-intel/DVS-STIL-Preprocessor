@@ -7,8 +7,10 @@ A GitHub Copilot skill and dependency-free Python CLI for preprocessing DVS STIL
 - Reads plain `.stil` and gzip-compressed `.stil.gz` files.
 - Preserves the source file and writes `*_process.stil` or `*_process.stil.gz`.
 - Calculates Loop counts exactly from free-drive time and TAP period.
+- Adds a 20,000-cycle copied Vector before each `dps_trigger: 0` and an empty 20,000-cycle Vector before each `dps_trigger: 1`.
+- Enforces a minimum of 100,000 cycles for each waiting-after-trigger Loop.
 - Generates unique label suffixes from `0` through `15`.
-- Copies the Vector immediately before each trigger and forces only `UART_RXD_DRD` low.
+- Supports CCD, IOD, and DRD pattern-specific pin profiles.
 - Supports STIL run-length notation such as `\r285 X`.
 - Rejects malformed, already processed, or unexpected input instead of silently producing a partial result.
 - Uses only the Python standard library.
@@ -28,7 +30,7 @@ tests/
 
 - Python 3.9 or newer
 - A DVS STIL body containing exactly 16 `SE_CMD dps_trigger: 0` instructions
-- An `_bidi_` signal-group definition containing `UART_RXD_DRD`
+- An `_bidi_` signal-group definition containing every signal required by the selected pattern type
 
 No third-party packages are required.
 
@@ -56,6 +58,7 @@ Before each run, the skill asks for:
 
 1. `freedrivetime`, including units, for example `1ms`.
 2. `tapperiod`, including units, for example `10ns`.
+3. Pattern type: `CCD`, `IOD`, or `DRD`.
 
 Supported units are `ns`, `us`, `µs`, `ms`, and `s`.
 
@@ -68,6 +71,7 @@ python .github/skills/dvs-stil-preprocessor/scripts/preprocess_dvs_stil.py `
 	path/to/DVS_body.stil.gz `
 	--free-drive-time 1ms `
 	--tap-period 10ns `
+	--pattern-type DRD `
 	--dry-run
 ```
 
@@ -77,7 +81,8 @@ Generate the processed file:
 python .github/skills/dvs-stil-preprocessor/scripts/preprocess_dvs_stil.py `
 	path/to/DVS_body.stil.gz `
 	--free-drive-time 1ms `
-	--tap-period 10ns
+	--tap-period 10ns `
+	--pattern-type DRD
 ```
 
 For an input named `DVS_body.stil.gz`, the default output is `DVS_body_process.stil.gz`.
@@ -89,28 +94,36 @@ python .github/skills/dvs-stil-preprocessor/scripts/preprocess_dvs_stil.py `
 	path/to/DVS_body.stil.gz `
 	--output path/to/custom_process.stil.gz `
 	--free-drive-time 1ms `
-	--tap-period 10ns
+	--tap-period 10ns `
+	--pattern-type DRD
 ```
 
 ## Transformation
 
 For each of the 16 original `dps_trigger: 0` instructions, block index $i$ ranges from $0$ to $15$ and the following sequence is produced:
 
-1. Keep `dps_trigger: 0`.
-2. Add `label:waiting_after_trigger0_i`.
-3. Add a free-drive Loop containing a copy of the preceding `V {}` block.
-4. In that copy only, force `UART_RXD_DRD` to `0`; all other values remain unchanged.
+1. Add `label:waiting_before_trigger0_i` and a 20,000-cycle Loop containing a copy of the preceding `V {}` block.
+2. In that pre-trigger copy only, force the selected pattern type's pins to `0`; all other values remain unchanged.
+3. Keep `dps_trigger: 0`.
+4. Add `label:waiting_after_trigger0_i` and an empty free-drive Loop.
 5. Add `label:start_stress_i` and an empty stress Loop.
-6. Add `dps_trigger: 1`.
-7. Add `label:waiting_after_trigger1_i` and another empty free-drive Loop.
-8. Retain the customer's original vectors after the inserted sequence.
+6. Add `label:waiting_before_trigger1_i` and an empty 20,000-cycle `V {}` Loop.
+7. Add `dps_trigger: 1`.
+8. Add `label:waiting_after_trigger1_i` and another empty free-drive Loop.
+9. Retain the customer's original vectors after the inserted sequence.
+
+Pin profiles:
+
+- `CCD`: `I2C_IPMI_SCL`, `STIMER_CCDNE1`, `UART_RXD_CCD_L_S`, `UART_RXD_CCD_S`
+- `IOD`: `UART_RXD_IOD`, `AVSBUS_SDATA0`
+- `DRD`: `UART_RXD_DRD`
 
 The trigger IDs remain `0` and `1` in every block. The label suffix identifies the block.
 
 ### Loop calculations
 
 $$
-N_{free} = \frac{freedrivetime + 0.2\,ms}{tapperiod}
+N_{free} = \max\left(\frac{freedrivetime + 0.2\,ms}{tapperiod}, 100000\right)
 $$
 
 $$
@@ -124,12 +137,14 @@ With `freedrivetime=1ms` and `tapperiod=10ns`:
 
 Both results must be exact integers. The program stops with an error rather than rounding.
 
+With `freedrivetime=1ms` and `tapperiod=20ns`, the calculated waiting count is `60000`, so the enforced waiting count is `100000`; the stress Loop count is `312500`.
+
 ## Safety checks
 
 The CLI refuses to generate output when:
 
 - The input does not contain the expected number of trigger blocks.
-- `UART_RXD_DRD` cannot be uniquely resolved in `_bidi_`.
+- A required pin for the selected pattern type cannot be uniquely resolved in `_bidi_`.
 - A trigger has no preceding complete `V {}` block.
 - A Loop count is not an exact positive integer.
 - The input already contains generated waiting labels.

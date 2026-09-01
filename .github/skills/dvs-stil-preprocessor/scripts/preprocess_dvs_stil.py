@@ -31,16 +31,31 @@ UNIT_TO_NS = {
     "ms": Decimal("1000000"),
     "s": Decimal("1000000000"),
 }
+PATTERN_SIGNALS = {
+    "CCD": (
+        "I2C_IPMI_SCL",
+        "STIMER_CCDNE1",
+        "UART_RXD_CCD_L_S",
+        "UART_RXD_CCD_S",
+    ),
+    "IOD": (
+        "UART_RXD_IOD",
+        "AVSBUS_SDATA0",
+    ),
+    "DRD": ("UART_RXD_DRD",),
+}
 
 
 @dataclass(frozen=True)
 class TransformResult:
     text: str
     block_count: int
+    pre_trigger_loops: int
     free_drive_loops: int
     stress_loops: int
-    bidi_signal: str
-    bidi_position: int
+    pattern_type: str
+    bidi_signals: tuple[str, ...]
+    bidi_positions: tuple[int, ...]
 
 
 def parse_duration_ns(value: str) -> Decimal:
@@ -143,11 +158,13 @@ def replace_vector_symbol(expression: str, zero_based_index: int, new_symbol: st
     )
 
 
-def force_bidi_signal(v_block: str, signal_position: int, value: str) -> str:
+def force_bidi_signals(v_block: str, signal_positions: tuple[int, ...], value: str) -> str:
     match = BIDI_ASSIGN_RE.search(v_block)
     if not match:
         raise ValueError("The Vector copied before a trigger has no _bidi_ assignment.")
-    changed = replace_vector_symbol(match.group(2), signal_position, value)
+    changed = match.group(2)
+    for signal_position in signal_positions:
+        changed = replace_vector_symbol(changed, signal_position, value)
     return v_block[: match.start(2)] + changed + v_block[match.end(2) :]
 
 
@@ -167,6 +184,7 @@ def previous_v_block(text: str, before: int) -> str:
 def build_insertion(
     trigger_line: str,
     copied_v: str,
+    pre_trigger_loops: int,
     free_drive_loops: int,
     stress_loops: int,
     block_index: int,
@@ -175,13 +193,23 @@ def build_insertion(
 ) -> str:
     copied_lines = indent_block(copied_v.lstrip(" \t"), indent + "  ").replace("\n", newline)
     lines = [
+        f"{indent}Ann {{* SE_CMD label:waiting_before_trigger0_{block_index}; *}}",
+        f"{indent}Loop {pre_trigger_loops} {{",
+        copied_lines,
+        f"{indent}}}  // end loop",
         trigger_line.rstrip("\r\n"),
         f"{indent}Ann {{* SE_CMD label:waiting_after_trigger0_{block_index}; *}}",
         f"{indent}Loop {free_drive_loops} {{",
-        copied_lines,
+        f"{indent}  V {{",
+        f"{indent}  }}",
         f"{indent}}}  // end loop",
         f"{indent}Ann {{* SE_CMD label:start_stress_{block_index}; *}}",
         f"{indent}Loop {stress_loops} {{",
+        f"{indent}  V {{",
+        f"{indent}  }}",
+        f"{indent}}}  // end loop",
+        f"{indent}Ann {{* SE_CMD label:waiting_before_trigger1_{block_index}; *}}",
+        f"{indent}Loop {pre_trigger_loops} {{",
         f"{indent}  V {{",
         f"{indent}  }}",
         f"{indent}}}  // end loop",
@@ -203,7 +231,9 @@ def transform(
     expected_blocks: int = 16,
     total_stress_time: str = "100ms",
     release_offset: str = "0.2ms",
-    bidi_signal: str = "UART_RXD_DRD",
+    pre_trigger_loops: int = 20000,
+    minimum_wait_loops: int = 100000,
+    pattern_type: str = "DRD",
 ) -> TransformResult:
     if "SE_CMD label:waiting_after_trigger0" in text:
         raise ValueError("Input appears to be already preprocessed; refusing to insert duplicate sequences.")
@@ -213,26 +243,40 @@ def transform(
         raise ValueError(
             f"Expected {expected_blocks} dps_trigger: 0 blocks, but found {len(trigger_matches)}."
         )
+    if pre_trigger_loops <= 0:
+        raise ValueError("Pre-trigger loop count must be greater than zero.")
+    if minimum_wait_loops <= 0:
+        raise ValueError("Minimum waiting loop count must be greater than zero.")
+    pattern_type = pattern_type.upper()
+    if pattern_type not in PATTERN_SIGNALS:
+        raise ValueError(
+            f"Unsupported pattern type {pattern_type!r}; choose CCD, IOD, or DRD."
+        )
 
     tap_ns = parse_duration_ns(tap_period)
     free_ns = parse_duration_ns(free_drive_time) + parse_duration_ns(release_offset)
     total_stress_ns = parse_duration_ns(total_stress_time)
-    free_drive_loops = exact_loop_count(free_ns, tap_ns, "free-drive time")
+    calculated_free_drive_loops = exact_loop_count(free_ns, tap_ns, "free-drive time")
+    free_drive_loops = max(calculated_free_drive_loops, minimum_wait_loops)
     stress_loops = exact_loop_count(
         total_stress_ns / Decimal(expected_blocks), tap_ns, "per-block stress time"
     )
-    signal_position = find_signal_position(text, bidi_signal)
+    bidi_signals = PATTERN_SIGNALS[pattern_type]
+    signal_positions = tuple(find_signal_position(text, signal) for signal in bidi_signals)
 
     chunks: list[str] = []
     cursor = 0
     for block_index, trigger in enumerate(trigger_matches):
-        copied_v = force_bidi_signal(previous_v_block(text, trigger.start()), signal_position, "0")
+        copied_v = force_bidi_signals(
+            previous_v_block(text, trigger.start()), signal_positions, "0"
+        )
         newline = "\r\n" if trigger.group("eol") == "\r\n" else "\n"
         chunks.append(text[cursor : trigger.start()])
         chunks.append(
             build_insertion(
                 trigger.group(0),
                 copied_v,
+                pre_trigger_loops,
                 free_drive_loops,
                 stress_loops,
                 block_index,
@@ -246,10 +290,12 @@ def transform(
     return TransformResult(
         text="".join(chunks),
         block_count=len(trigger_matches),
+        pre_trigger_loops=pre_trigger_loops,
         free_drive_loops=free_drive_loops,
         stress_loops=stress_loops,
-        bidi_signal=bidi_signal,
-        bidi_position=signal_position + 1,
+        pattern_type=pattern_type,
+        bidi_signals=bidi_signals,
+        bidi_positions=tuple(position + 1 for position in signal_positions),
     )
 
 
@@ -264,7 +310,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-blocks", type=int, default=16)
     parser.add_argument("--total-stress-time", default="100ms")
     parser.add_argument("--release-offset", default="0.2ms")
-    parser.add_argument("--bidi-signal", default="UART_RXD_DRD")
+    parser.add_argument("--pre-trigger-loops", type=int, default=20000)
+    parser.add_argument("--minimum-wait-loops", type=int, default=100000)
+    parser.add_argument("--pattern-type", required=True, choices=tuple(PATTERN_SIGNALS))
     parser.add_argument("--dry-run", action="store_true", help="Validate and report without writing output")
     return parser
 
@@ -284,7 +332,9 @@ def main() -> int:
             expected_blocks=args.expected_blocks,
             total_stress_time=args.total_stress_time,
             release_offset=args.release_offset,
-            bidi_signal=args.bidi_signal,
+            pre_trigger_loops=args.pre_trigger_loops,
+            minimum_wait_loops=args.minimum_wait_loops,
+            pattern_type=args.pattern_type,
         )
         output = args.output or default_output_path(args.input)
         if not args.dry_run:
@@ -292,9 +342,12 @@ def main() -> int:
                 raise ValueError("Output must differ from input; the source file is never overwritten.")
             write_text(output, result.text)
         print(f"Blocks processed: {result.block_count}")
+        print(f"Pre-trigger loop count: {result.pre_trigger_loops}")
         print(f"Free-drive loop count: {result.free_drive_loops}")
         print(f"Stress loop count: {result.stress_loops}")
-        print(f"Forced signal: {result.bidi_signal} (bidi position {result.bidi_position})")
+        print(f"Pattern type: {result.pattern_type}")
+        for signal, position in zip(result.bidi_signals, result.bidi_positions):
+            print(f"Forced signal: {signal} (bidi position {position})")
         print("Output: not written (dry run)" if args.dry_run else f"Output: {output}")
         return 0
     except (OSError, UnicodeError, ValueError) as exc:

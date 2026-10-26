@@ -6,8 +6,10 @@ A GitHub Copilot skill and dependency-free Python CLI for preprocessing DVS STIL
 
 - Reads plain `.stil` and gzip-compressed `.stil.gz` files.
 - Preserves the source file and writes `*_process.stil` or `*_process.stil.gz`.
-- Calculates Loop counts exactly from free-drive time and TAP period.
+- Calculates Loop counts exactly from free-drive time and the supplied minimum period per cycle.
 - Adds a 20,000-cycle copied Vector before each `dps_trigger: 0` and an empty 20,000-cycle Vector before each `dps_trigger: 1`.
+- Masks every `_po_` symbol to `X` in the copied pre-trigger Vector only; original customer Vectors remain unchanged.
+- Masks `_bidi_` H/L symbols to `X`, then forces the profile pins to `0` in `_bidi_` or `_pi_` (whichever uniquely defines each pin).
 - Enforces a minimum of 100,000 cycles for each waiting-after-trigger Loop.
 - Generates unique label suffixes from `0` through `15`.
 - Supports CCD, IOD, and DRD pattern-specific pin profiles.
@@ -30,7 +32,7 @@ tests/
 
 - Python 3.9 or newer
 - A DVS STIL body containing exactly 16 `SE_CMD dps_trigger: 0` instructions
-- An `_bidi_` signal-group definition containing every signal required by the selected pattern type
+- `_bidi_` and/or `_pi_` signal-group definitions containing each required signal exactly once across the two groups
 
 No third-party packages are required.
 
@@ -57,7 +59,7 @@ The skill can then be invoked as `/dvs-stil-preprocessor` or discovered automati
 Before each run, the skill asks for:
 
 1. `freedrivetime`, including units, for example `1ms`.
-2. `tapperiod`, including units, for example `10ns`.
+2. Minimum period per cycle, including units, for example `10ns`. Confirm the intended value; a STIL `Time_period` is not automatically treated as this input.
 3. Pattern type: `CCD`, `IOD`, or `DRD`.
 
 Supported units are `ns`, `us`, `µs`, `ms`, and `s`.
@@ -70,7 +72,7 @@ Run a validation-only pass first:
 python .github/skills/dvs-stil-preprocessor/scripts/preprocess_dvs_stil.py `
 	path/to/DVS_body.stil.gz `
 	--free-drive-time 1ms `
-	--tap-period 10ns `
+	--min-period-per-cycle 10ns `
 	--pattern-type DRD `
 	--dry-run
 ```
@@ -81,7 +83,7 @@ Generate the processed file:
 python .github/skills/dvs-stil-preprocessor/scripts/preprocess_dvs_stil.py `
 	path/to/DVS_body.stil.gz `
 	--free-drive-time 1ms `
-	--tap-period 10ns `
+	--min-period-per-cycle 10ns `
 	--pattern-type DRD
 ```
 
@@ -94,7 +96,7 @@ python .github/skills/dvs-stil-preprocessor/scripts/preprocess_dvs_stil.py `
 	path/to/DVS_body.stil.gz `
 	--output path/to/custom_process.stil.gz `
 	--free-drive-time 1ms `
-	--tap-period 10ns `
+	--min-period-per-cycle 10ns `
 	--pattern-type DRD
 ```
 
@@ -103,7 +105,7 @@ python .github/skills/dvs-stil-preprocessor/scripts/preprocess_dvs_stil.py `
 For each of the 16 original `dps_trigger: 0` instructions, block index $i$ ranges from $0$ to $15$ and the following sequence is produced:
 
 1. Add `label:waiting_before_trigger0_i` and a 20,000-cycle Loop containing a copy of the preceding `V {}` block.
-2. In that pre-trigger copy only, force the selected pattern type's pins to `0`; all other values remain unchanged.
+2. In that pre-trigger copy only, mask all H/L symbols in `_bidi_` to `X` (including run-length notation); then force each selected pin to `0` in its actual `_bidi_` or `_pi_` group. `0` takes precedence for selected pins. Set every `_po_` symbol to `X`, preserving run-length counts and whitespace; all other values remain unchanged.
 3. Keep `dps_trigger: 0`.
 4. Add `label:waiting_after_trigger0_i` and an empty free-drive Loop.
 5. Add `label:start_stress_i` and an empty stress Loop.
@@ -123,28 +125,29 @@ The trigger IDs remain `0` and `1` in every block. The label suffix identifies t
 ### Loop calculations
 
 $$
-N_{free} = \max\left(\frac{freedrivetime + 0.2\,ms}{tapperiod}, 100000\right)
+N_{free} = \max\left(\frac{freedrivetime + 0.2\,ms}{\text{min period per cycle}}, 100000\right)
 $$
 
 $$
-N_{stress} = \frac{100\,ms / 16}{tapperiod}
+N_{stress} = \frac{100\,ms / 16}{\text{min period per cycle}}
 $$
 
-With `freedrivetime=1ms` and `tapperiod=10ns`:
+With `freedrivetime=1ms` and `min period per cycle=10ns`:
 
 - Free-drive Loop count: `120000`
 - Stress Loop count: `625000`
 
 Both results must be exact integers. The program stops with an error rather than rounding.
 
-With `freedrivetime=1ms` and `tapperiod=20ns`, the calculated waiting count is `60000`, so the enforced waiting count is `100000`; the stress Loop count is `312500`.
+With `freedrivetime=1ms` and `min period per cycle=20ns`, the calculated waiting count is `60000`, so the enforced waiting count is `100000`; the stress Loop count is `312500`. The previous `--tap-period` flag remains an alias for existing invocations.
 
 ## Safety checks
 
 The CLI refuses to generate output when:
 
 - The input does not contain the expected number of trigger blocks.
-- A required pin for the selected pattern type cannot be uniquely resolved in `_bidi_`.
+- A required pin for the selected pattern type cannot be uniquely resolved across `_bidi_` and `_pi_`, or its group's copied Vector assignment is missing.
+- The copied Vector has no unique, nonempty `_po_` assignment or contains unsupported `_po_` run-length notation.
 - A trigger has no preceding complete `V {}` block.
 - A Loop count is not an exact positive integer.
 - The input already contains generated waiting labels.

@@ -17,7 +17,8 @@ TRIGGER_RE = re.compile(
 )
 V_BLOCK_RE = re.compile(r"(?ms)^[ \t]*V\s*\{.*?^[ \t]*\}")
 BIDI_ASSIGN_RE = re.compile(r"(?s)(\b_bidi_\s*=\s*)(.*?)(;)")
-BIDI_GROUP_RE = re.compile(r"(?s)\b_bidi_\s*=\s*(.*?);")
+PI_ASSIGN_RE = re.compile(r"(?s)(\b_pi_\s*=\s*)(.*?)(;)")
+PO_ASSIGN_RE = re.compile(r"(?s)(\b_po_\s*=\s*)(.*?)(;)")
 SIGNAL_RE = re.compile(r'"([^"\r\n]+)"(?:\s*\[\s*(\d+)\s*\])?')
 RLE_RE = re.compile(r"\\r(\d+)\s+(\S)")
 DURATION_RE = re.compile(
@@ -56,6 +57,7 @@ class TransformResult:
     pattern_type: str
     bidi_signals: tuple[str, ...]
     bidi_positions: tuple[int, ...]
+    signal_groups: tuple[str, ...]
 
 
 def parse_duration_ns(value: str) -> Decimal:
@@ -73,13 +75,13 @@ def parse_duration_ns(value: str) -> Decimal:
     return number * UNIT_TO_NS[match.group("unit").lower()]
 
 
-def exact_loop_count(duration_ns: Decimal, tap_period_ns: Decimal, name: str) -> int:
-    quotient = duration_ns / tap_period_ns
+def exact_loop_count(duration_ns: Decimal, min_period_per_cycle_ns: Decimal, name: str) -> int:
+    quotient = duration_ns / min_period_per_cycle_ns
     integral = quotient.to_integral_value()
     if quotient != integral:
         raise ValueError(
             f"{name} does not produce an integer loop count: {duration_ns}ns / "
-            f"{tap_period_ns}ns = {quotient}."
+            f"{min_period_per_cycle_ns}ns = {quotient}."
         )
     if integral <= 0:
         raise ValueError(f"{name} loop count must be greater than zero.")
@@ -110,17 +112,22 @@ def default_output_path(input_path: Path) -> Path:
     return input_path.with_name(name)
 
 
-def find_signal_position(text: str, signal_name: str) -> int:
-    group_match = BIDI_GROUP_RE.search(text)
-    if not group_match:
-        raise ValueError("Could not find the _bidi_ signal-group definition.")
-    signals = [match.group(1) for match in SIGNAL_RE.finditer(group_match.group(1))]
-    matches = [index for index, name in enumerate(signals) if name == signal_name]
-    if not matches:
-        raise ValueError(f"Signal {signal_name!r} is not present in the _bidi_ group.")
-    if len(matches) != 1:
-        raise ValueError(f"Signal {signal_name!r} occurs more than once in the _bidi_ group.")
-    return matches[0]
+def find_signal_location(text: str, signal_name: str) -> tuple[str, int]:
+    """Resolve a forced pin uniquely across the ordered _bidi_ and _pi_ groups."""
+    locations = []
+    for group in ("_bidi_", "_pi_"):
+        definition = re.search(r"(?s)\b" + group + r"\s*=\s*(.*?);", text)
+        if definition is None:
+            continue
+        signals = [match.group(1) for match in SIGNAL_RE.finditer(definition.group(1))]
+        locations.extend((group, index) for index, name in enumerate(signals)
+                         if name == signal_name)
+    if len(locations) != 1:
+        raise ValueError(
+            f"Signal {signal_name!r} must appear exactly once across _bidi_ and _pi_; "
+            f"found {len(locations)} occurrences."
+        )
+    return locations[0]
 
 
 def replace_vector_symbol(expression: str, zero_based_index: int, new_symbol: str) -> str:
@@ -158,14 +165,82 @@ def replace_vector_symbol(expression: str, zero_based_index: int, new_symbol: st
     )
 
 
-def force_bidi_signals(v_block: str, signal_positions: tuple[int, ...], value: str) -> str:
-    match = BIDI_ASSIGN_RE.search(v_block)
-    if not match:
-        raise ValueError("The Vector copied before a trigger has no _bidi_ assignment.")
+def force_group_signals(
+    v_block: str, group: str, signal_positions: tuple[int, ...], value: str
+) -> str:
+    if not signal_positions:
+        return v_block
+    assignment = {"_bidi_": BIDI_ASSIGN_RE, "_pi_": PI_ASSIGN_RE}[group]
+    matches = list(assignment.finditer(v_block))
+    if len(matches) != 1:
+        raise ValueError(f"The Vector copied before a trigger must have exactly one {group} assignment.")
+    match = matches[0]
     changed = match.group(2)
     for signal_position in signal_positions:
         changed = replace_vector_symbol(changed, signal_position, value)
     return v_block[: match.start(2)] + changed + v_block[match.end(2) :]
+
+
+def force_bidi_signals(v_block: str, signal_positions: tuple[int, ...], value: str) -> str:
+    return force_group_signals(v_block, "_bidi_", signal_positions, value)
+
+
+def mask_bidi_high_low(v_block: str) -> str:
+    """Mask H/L symbols in the copied _bidi_ vector; keep other symbols and RLE counts."""
+    matches = list(BIDI_ASSIGN_RE.finditer(v_block))
+    if not matches:
+        return v_block
+    if len(matches) != 1:
+        raise ValueError("The Vector copied before a trigger has multiple _bidi_ assignments.")
+    match = matches[0]
+    expression = match.group(2)
+    cursor = 0
+    pieces: list[str] = []
+    while cursor < len(expression):
+        char = expression[cursor]
+        if char == "\\":
+            rle = RLE_RE.match(expression, cursor)
+            if not rle or int(rle.group(1)) <= 0:
+                raise ValueError("Unsupported _bidi_ run-length notation in copied Vector.")
+            pieces.append(expression[cursor : rle.end() - 1] +
+                          ("X" if rle.group(2) in "HL" else rle.group(2)))
+            cursor = rle.end()
+        else:
+            pieces.append("X" if char in "HL" else char)
+            cursor += 1
+    return v_block[: match.start(2)] + "".join(pieces) + v_block[match.end(2) :]
+
+
+def mask_po_signals(v_block: str) -> str:
+    """Mask every output symbol in the copied vector, retaining RLE counts and layout."""
+    matches = list(PO_ASSIGN_RE.finditer(v_block))
+    if len(matches) != 1:
+        raise ValueError("The Vector copied before a trigger must have exactly one _po_ assignment.")
+    match = matches[0]
+    expression = match.group(2)
+    cursor = 0
+    pieces: list[str] = []
+    symbols = 0
+    while cursor < len(expression):
+        char = expression[cursor]
+        if char.isspace():
+            pieces.append(char)
+            cursor += 1
+            continue
+        if char == "\\":
+            rle = RLE_RE.match(expression, cursor)
+            if not rle or int(rle.group(1)) <= 0:
+                raise ValueError("Unsupported _po_ run-length notation in copied Vector.")
+            pieces.append(expression[cursor : rle.end() - 1] + "X")
+            symbols += int(rle.group(1))
+            cursor = rle.end()
+            continue
+        pieces.append("X")
+        symbols += 1
+        cursor += 1
+    if not symbols:
+        raise ValueError("The _po_ assignment in the copied Vector is empty.")
+    return v_block[: match.start(2)] + "".join(pieces) + v_block[match.end(2) :]
 
 
 def indent_block(block: str, prefix: str) -> str:
@@ -226,7 +301,7 @@ def build_insertion(
 def transform(
     text: str,
     free_drive_time: str,
-    tap_period: str,
+    min_period_per_cycle: str,
     *,
     expected_blocks: int = 16,
     total_stress_time: str = "100ms",
@@ -253,23 +328,26 @@ def transform(
             f"Unsupported pattern type {pattern_type!r}; choose CCD, IOD, or DRD."
         )
 
-    tap_ns = parse_duration_ns(tap_period)
+    cycle_ns = parse_duration_ns(min_period_per_cycle)
     free_ns = parse_duration_ns(free_drive_time) + parse_duration_ns(release_offset)
     total_stress_ns = parse_duration_ns(total_stress_time)
-    calculated_free_drive_loops = exact_loop_count(free_ns, tap_ns, "free-drive time")
+    calculated_free_drive_loops = exact_loop_count(free_ns, cycle_ns, "free-drive time")
     free_drive_loops = max(calculated_free_drive_loops, minimum_wait_loops)
     stress_loops = exact_loop_count(
-        total_stress_ns / Decimal(expected_blocks), tap_ns, "per-block stress time"
+        total_stress_ns / Decimal(expected_blocks), cycle_ns, "per-block stress time"
     )
     bidi_signals = PATTERN_SIGNALS[pattern_type]
-    signal_positions = tuple(find_signal_position(text, signal) for signal in bidi_signals)
+    locations = tuple(find_signal_location(text, signal) for signal in bidi_signals)
+    bidi_positions = tuple(position for group, position in locations if group == "_bidi_")
+    pi_positions = tuple(position for group, position in locations if group == "_pi_")
 
     chunks: list[str] = []
     cursor = 0
     for block_index, trigger in enumerate(trigger_matches):
-        copied_v = force_bidi_signals(
-            previous_v_block(text, trigger.start()), signal_positions, "0"
-        )
+        copied_v = mask_bidi_high_low(previous_v_block(text, trigger.start()))
+        copied_v = force_group_signals(copied_v, "_bidi_", bidi_positions, "0")
+        copied_v = force_group_signals(copied_v, "_pi_", pi_positions, "0")
+        copied_v = mask_po_signals(copied_v)
         newline = "\r\n" if trigger.group("eol") == "\r\n" else "\n"
         chunks.append(text[cursor : trigger.start()])
         chunks.append(
@@ -295,7 +373,8 @@ def transform(
         stress_loops=stress_loops,
         pattern_type=pattern_type,
         bidi_signals=bidi_signals,
-        bidi_positions=tuple(position + 1 for position in signal_positions),
+        bidi_positions=tuple(position + 1 for _, position in locations),
+        signal_groups=tuple(group for group, _ in locations),
     )
 
 
@@ -306,7 +385,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("input", type=Path, help="Input .stil or .stil.gz file")
     parser.add_argument("--output", "-o", type=Path, help="Output path (default: *_process.stil[.gz])")
     parser.add_argument("--free-drive-time", required=True, help="Free-drive duration, e.g. 1ms")
-    parser.add_argument("--tap-period", required=True, help="TAP period, e.g. 10ns")
+    parser.add_argument(
+        "--min-period-per-cycle", "--tap-period",
+        dest="min_period_per_cycle", required=True,
+        help="Minimum period per cycle with unit, e.g. 10ns (--tap-period is a legacy alias)",
+    )
     parser.add_argument("--expected-blocks", type=int, default=16)
     parser.add_argument("--total-stress-time", default="100ms")
     parser.add_argument("--release-offset", default="0.2ms")
@@ -328,7 +411,7 @@ def main() -> int:
         result = transform(
             text,
             args.free_drive_time,
-            args.tap_period,
+            args.min_period_per_cycle,
             expected_blocks=args.expected_blocks,
             total_stress_time=args.total_stress_time,
             release_offset=args.release_offset,
@@ -346,8 +429,10 @@ def main() -> int:
         print(f"Free-drive loop count: {result.free_drive_loops}")
         print(f"Stress loop count: {result.stress_loops}")
         print(f"Pattern type: {result.pattern_type}")
-        for signal, position in zip(result.bidi_signals, result.bidi_positions):
-            print(f"Forced signal: {signal} (bidi position {position})")
+        for signal, group, position in zip(
+            result.bidi_signals, result.signal_groups, result.bidi_positions
+        ):
+            print(f"Forced signal: {signal} ({group[1:-1]} position {position})")
         print("Output: not written (dry run)" if args.dry_run else f"Output: {output}")
         return 0
     except (OSError, UnicodeError, ValueError) as exc:
